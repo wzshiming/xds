@@ -230,7 +230,7 @@ func mainV3(ctx context.Context) {
 	conf.NodeConfig.NodeID = nodeId
 	conf.NodeConfig.Metadata = metadata
 
-	cli := xds_v3.NewClient(url, tlsConfig, nil)
+	cli := xds_v3.NewClient(url, tlsConfig, &conf)
 	err := cli.Run(ctx)
 	if err != nil {
 		log.Fatalln(err)
