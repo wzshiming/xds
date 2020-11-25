@@ -54,6 +54,10 @@ type Client struct {
 	url       string
 	isClose   bool
 	node      *envoy_config_core_v3.Node
+
+	// Last received message, by type
+	received map[string]*envoy_service_discovery_v3.DiscoveryResponse
+
 	Config
 }
 
@@ -62,6 +66,7 @@ func NewClient(url string, tlsConfig *tls.Config, opts *Config) *Client {
 	ads := &Client{
 		tlsConfig: tlsConfig,
 		url:       url,
+		received:  map[string]*envoy_service_discovery_v3.DiscoveryResponse{},
 	}
 	if opts != nil {
 		ads.Config = *opts
@@ -148,6 +153,7 @@ func (c *Client) handleRecv() error {
 	listeners := []*envoy_config_listener_v3.Listener{}
 	routes := []*envoy_config_route_v3.RouteConfiguration{}
 	secrets := []*envoy_extensions_transport_sockets_tls_v3.Secret{}
+	names := []string{}
 	others := []*any.Any{}
 	ctx := c.stream.Context()
 	for {
@@ -169,6 +175,7 @@ func (c *Client) handleRecv() error {
 		routes = routes[:0]
 		secrets = secrets[:0]
 		others = others[:0]
+		names = names[:0]
 
 		for _, rsc := range msg.Resources {
 			switch rsc.TypeUrl {
@@ -180,6 +187,7 @@ func (c *Client) handleRecv() error {
 				ll := &envoy_config_endpoint_v3.ClusterLoadAssignment{}
 				_ = proto.Unmarshal(rsc.Value, ll)
 				endpoints = append(endpoints, ll)
+				names = append(names, ll.ClusterName)
 			case ListenerType:
 				ll := &envoy_config_listener_v3.Listener{}
 				_ = proto.Unmarshal(rsc.Value, ll)
@@ -188,6 +196,7 @@ func (c *Client) handleRecv() error {
 				ll := &envoy_config_route_v3.RouteConfiguration{}
 				_ = proto.Unmarshal(rsc.Value, ll)
 				routes = append(routes, ll)
+				names = append(names, ll.Name)
 			case SecretType:
 				ll := &envoy_extensions_transport_sockets_tls_v3.Secret{}
 				_ = proto.Unmarshal(rsc.Value, ll)
@@ -216,7 +225,7 @@ func (c *Client) handleRecv() error {
 			c.HandleNotFound(c, others)
 		}
 
-		c.ack(msg)
+		c.ack(msg, names)
 	}
 }
 
@@ -236,17 +245,26 @@ func (c *Client) Send(req *envoy_service_discovery_v3.DiscoveryRequest) error {
 }
 
 func (c *Client) SendRsc(typeURL string, rsc []string) error {
+	ex := c.received[typeURL]
+	version := ""
+	nonce := ""
+	if ex != nil {
+		version = ex.VersionInfo
+		nonce = ex.Nonce
+	}
 	return c.Send(&envoy_service_discovery_v3.DiscoveryRequest{
-		ResponseNonce: "",
+		ResponseNonce: nonce,
 		TypeUrl:       typeURL,
+		VersionInfo:   version,
 		ResourceNames: rsc,
 	})
 }
 
-func (c *Client) ack(msg *envoy_service_discovery_v3.DiscoveryResponse) error {
+func (c *Client) ack(msg *envoy_service_discovery_v3.DiscoveryResponse, rsc []string) error {
 	return c.Send(&envoy_service_discovery_v3.DiscoveryRequest{
 		ResponseNonce: msg.Nonce,
 		TypeUrl:       msg.TypeUrl,
 		VersionInfo:   msg.VersionInfo,
+		ResourceNames: rsc,
 	})
 }
