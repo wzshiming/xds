@@ -56,7 +56,7 @@ type Client struct {
 	node      *envoy_config_core_v3.Node
 
 	// Last received message, by type
-	received map[string]*envoy_service_discovery_v3.DiscoveryResponse
+	received map[string]*cache
 
 	Config
 }
@@ -66,7 +66,7 @@ func NewClient(url string, tlsConfig *tls.Config, opts *Config) *Client {
 	ads := &Client{
 		tlsConfig: tlsConfig,
 		url:       url,
-		received:  map[string]*envoy_service_discovery_v3.DiscoveryResponse{},
+		received:  map[string]*cache{},
 	}
 	if opts != nil {
 		ads.Config = *opts
@@ -153,7 +153,6 @@ func (c *Client) handleRecv() error {
 	listeners := []*envoy_config_listener_v3.Listener{}
 	routes := []*envoy_config_route_v3.RouteConfiguration{}
 	secrets := []*envoy_extensions_transport_sockets_tls_v3.Secret{}
-	names := []string{}
 	others := []*any.Any{}
 	ctx := c.stream.Context()
 	for {
@@ -175,7 +174,6 @@ func (c *Client) handleRecv() error {
 		routes = routes[:0]
 		secrets = secrets[:0]
 		others = others[:0]
-		names = names[:0]
 
 		for _, rsc := range msg.Resources {
 			switch rsc.TypeUrl {
@@ -187,7 +185,6 @@ func (c *Client) handleRecv() error {
 				ll := &envoy_config_endpoint_v3.ClusterLoadAssignment{}
 				_ = proto.Unmarshal(rsc.Value, ll)
 				endpoints = append(endpoints, ll)
-				names = append(names, ll.ClusterName)
 			case ListenerType:
 				ll := &envoy_config_listener_v3.Listener{}
 				_ = proto.Unmarshal(rsc.Value, ll)
@@ -196,7 +193,6 @@ func (c *Client) handleRecv() error {
 				ll := &envoy_config_route_v3.RouteConfiguration{}
 				_ = proto.Unmarshal(rsc.Value, ll)
 				routes = append(routes, ll)
-				names = append(names, ll.Name)
 			case SecretType:
 				ll := &envoy_extensions_transport_sockets_tls_v3.Secret{}
 				_ = proto.Unmarshal(rsc.Value, ll)
@@ -224,8 +220,7 @@ func (c *Client) handleRecv() error {
 		if len(others) != 0 && c.HandleNotFound != nil {
 			c.HandleNotFound(c, others)
 		}
-
-		c.ack(msg, names)
+		c.ack(msg)
 	}
 }
 
@@ -245,13 +240,12 @@ func (c *Client) Send(req *envoy_service_discovery_v3.DiscoveryRequest) error {
 }
 
 func (c *Client) SendRsc(typeURL string, rsc []string) error {
-	ex := c.received[typeURL]
-	version := ""
-	nonce := ""
-	if ex != nil {
-		version = ex.VersionInfo
-		nonce = ex.Nonce
+	if c.received[typeURL] == nil {
+		c.received[typeURL] = &cache{}
 	}
+	c.received[typeURL].Names = rsc
+	version := c.received[typeURL].VersionInfo
+	nonce := c.received[typeURL].Nonce
 	return c.Send(&envoy_service_discovery_v3.DiscoveryRequest{
 		ResponseNonce: nonce,
 		TypeUrl:       typeURL,
@@ -260,11 +254,23 @@ func (c *Client) SendRsc(typeURL string, rsc []string) error {
 	})
 }
 
-func (c *Client) ack(msg *envoy_service_discovery_v3.DiscoveryResponse, rsc []string) error {
+func (c *Client) ack(msg *envoy_service_discovery_v3.DiscoveryResponse) error {
+	if c.received[msg.TypeUrl] == nil {
+		c.received[msg.TypeUrl] = &cache{}
+	}
+	c.received[msg.TypeUrl].VersionInfo = msg.VersionInfo
+	c.received[msg.TypeUrl].Nonce = msg.Nonce
+	rsc := c.received[msg.TypeUrl].Names
 	return c.Send(&envoy_service_discovery_v3.DiscoveryRequest{
 		ResponseNonce: msg.Nonce,
 		TypeUrl:       msg.TypeUrl,
 		VersionInfo:   msg.VersionInfo,
 		ResourceNames: rsc,
 	})
+}
+
+type cache struct {
+	VersionInfo string
+	Nonce       string
+	Names       []string
 }
